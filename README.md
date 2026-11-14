@@ -22,7 +22,7 @@ video.srt  (English subtitles with the original timestamps)
    │  place them on a timeline at each subtitle's start time
    ▼
 video.dub.wav
-   │  ffmpeg (copy video stream, replace audio stream)
+   │  ffmpeg (copy video stream, replace audio stream; see section 8 for TV-safe 48 kHz stereo)
    ▼
 video.dubbed.mp4   (or overwrite the original with --replace)
 ```
@@ -255,6 +255,62 @@ The script prints a summary such as how many clips were sped up, the largest del
 
 Synthesised clips are cached in a `<video>.tts/` folder, keyed on the line text and voice, so editing a few subtitle lines only re-synthesises those lines.
 
+## 8. Playing the dubbed videos on a TV (Samsung USB playback fix)
+
+**Symptom:** The dubbed videos play fine on a laptop, but on a Samsung TV (played from a USB stick) the audio skips or stutters.
+
+**Cause:** The audio track written by `srt_to_dubbed_video.py` is **24 kHz, mono** AAC. That comes from `SAMPLE_RATE = 24000` in the script (Piper voices natively produce 22.05 kHz mono), not from the original YouTube video. PC players handle this without trouble, but TV hardware decoders generally expect standard rates (44.1 or 48 kHz) and stereo. On my Samsung TV, the unusual sample rate combined with a single-channel AAC stream inside an MP4 made the audio clock lose sync and skip. I haven't confirmed which of the two factors is decisive, but converting both fixed it.
+
+Check what you have:
+
+```bash
+ffprobe -v error -select_streams a:0 \
+  -show_entries stream=codec_name,sample_rate,channels -of default=nw=1 vid1.mp4
+# Problem files show: sample_rate=24000, channels=1
+```
+
+### Fix A: repair files you have already dubbed
+
+Re-encode only the audio to 48 kHz stereo AAC. The video stream is copied untouched, so this takes seconds per file:
+
+```bash
+ffmpeg -i "vid1.mp4" -c:v copy -c:a aac -ar 48000 -ac 2 -b:a 128k \
+  -movflags +faststart vid1_fixed.mp4
+```
+
+For all files (writes `*_fixed.mp4` alongside the originals):
+
+```bash
+for f in vida vidb vid1 vid2 vid3 vid4 vid5; do
+  ffmpeg -i "$f.mp4" -c:v copy -c:a aac -ar 48000 -ac 2 -b:a 128k \
+    -movflags +faststart "${f}_fixed.mp4"
+done
+```
+
+Once you've confirmed the fixed files play correctly on the TV, you can replace the originals:
+
+```bash
+for f in vida vidb vid1 vid2 vid3 vid4 vid5; do mv "${f}_fixed.mp4" "$f.mp4"; done
+```
+
+`-movflags +faststart` moves the MP4 index to the start of the file, which helps some TVs and media players start playback and seek more reliably.
+
+### Fix B: make the script output TV-friendly audio from now on
+
+In `srt_to_dubbed_video.py`, find the final mux command inside `dub()` and add the sample-rate, channel and faststart options:
+
+```python
+    cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", AUDIO_BITRATE,
+            "-ar", "48000", "-ac", "2",                      # TV-friendly: 48 kHz stereo
+            "-metadata:s:a:0", "language=eng", "-disposition:a:0", "default",
+            "-movflags", "+faststart",
+            "-shortest", out]
+```
+
+You can leave `SAMPLE_RATE = 24000` as is. The internal timeline stays small and only the final AAC track is resampled and upmixed to stereo. Raising `AUDIO_BITRATE` to `128k` or higher is fine for speech (the default is `160k`).
+
+If a different TV or player still has trouble, make sure the video is H.264/AAC in an `.mp4` container, which is the most widely supported combination for USB playback.
+
 ## Tuning
 
 - **Too slow?** Set `MODEL_SIZE = "medium"` (or `"turbo"`), or run on a machine with an NVIDIA GPU with `DEVICE = "cuda"`.
@@ -273,11 +329,13 @@ Synthesised clips are cached in a `<video>.tts/` folder, keyed on the line text 
 | `[!] vidX.srt not found - skipping` | Run script 1 first; the SRT must share the video's base name |
 | `Only 1 core is available` warning | Your shell may be pinned; check `taskset -cp $$` |
 | Output duration mismatch error | Source file may have odd timestamps; inspect with `ffprobe` |
+| Audio skips or stutters on a TV (USB playback) but is fine on a PC | Audio is 24 kHz mono; convert to 48 kHz stereo, see [section 8](#8-playing-the-dubbed-videos-on-a-tv-samsung-usb-playback-fix) |
 
 ## Limitations
 
 - Machine translation of technical speech can still contain errors; skim the SRT for product names and commands.
 - The voice is a single synthetic voice for all speakers, with no emotion or lip-sync.
+- Dubbed videos use 24 kHz mono audio by default, which can skip on some TVs; apply the fix in section 8.
 - Intended for personal study of content you have the right to use; respect the original creators' licences.
 
 ## Licence
